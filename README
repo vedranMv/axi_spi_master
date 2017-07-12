@@ -1,11 +1,11 @@
-#SPI master IP core
+# SPI master IP core
 
 Implementation of SPI master in VHDL. IP core contains simple SPI master with variable clock, data size and 3 slave-select lines. Folder /API contains C library allowing to use SPI functionality from xyllinux running on ARM cores of Zynq chip. For use in bare metal applications comment out Xil_In & Xil_Out functions from API/axispi.c and use ones provided by Xilinx SDK.
 
 
 Features:
 
-⋅⋅* Variable clock from 1Hz to 50MHz through 32bit clock divider (base clock 50MHz)
+⋅⋅* Variable clock from 4.6kHz to 445kHz through 32bit clock divider (base clock 50MHz)
 ⋅⋅* 3 slave-select outputs
 ⋅⋅* Variable data length from 8 to 32 bits
 ⋅⋅* Fixed polarity: Data is set on falling CLK edge and read on rising

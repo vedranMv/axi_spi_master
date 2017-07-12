@@ -105,6 +105,12 @@ void SPIConfig(uint32_t div, uint8_t dataWidth)
     else if (dataWidth > 32)
         dataWidth = 32;
 
+    //  Apply range on clock divider
+    if (div < 120)
+        div = 120;
+    else if (div > 11000)
+        div = 11000;
+
     device_handle.BaseAddress = BASE_ADDR;
     Xil_Out32(REG_SPICLKDIV, div);
 
