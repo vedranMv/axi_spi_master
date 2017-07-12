@@ -10,20 +10,32 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdio.h>
 
-extern int 	SPIInit();
+#define BASE_ADDR	0x42000000
+
+typedef struct
+{
+	uint32_t BaseAddress;
+	uint32_t IsReady;
+	int InterruptPresent;
+} AXISPI;
+
+extern AXISPI device_handle;
+
+extern void 	SPIInit();
 extern void     SPIDeinit();
+extern void     SPIConfig(uint32_t div, uint8_t dataWidth);
 
-extern void     SPISetClockDivider(uint32_t divider);
+extern void     SPIActivateSlave(uint32_t id);
+extern void     SPIDeactivateSlave(uint32_t id);
 
-extern void 	SPIActivateSlave(uint32_t id);
-extern void 	SPIDeactivateSlave(uint32_t id);
+extern uint32_t SPIPutData(uint32_t data);
+extern uint32_t SPIGetData();
 
-extern uint8_t 	SPIPutByte(uint32_t data);
-extern uint8_t 	SPIGetByte();
+extern uint8_t  SPIPutByte(uint32_t data);
+extern uint8_t  SPIGetByte();
 
-extern uint32_t SPIGetMISO();
+extern bool	SPIBusy();
 
 
 #endif /* SRC_AXISPI_H_ */

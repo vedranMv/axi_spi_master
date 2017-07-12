@@ -113,33 +113,39 @@ architecture arch_imp of axi_spi_v1_0_S00_AXI is
 	constant OPT_MEM_ADDR_BITS : integer := 1;
 	------------------------------------------------
 	---- Signals for user logic register space example
-	--Flag to signal interal logic that new data is ready to be transmitted
-	signal miso_data_flag  : std_logic := '0';
 	--Flag to signal internal logic that new data has been received from slave
 	signal mosi_data_flag  : std_logic := '0';
 	--Internal version of SPI clock signal
 	signal clock_out       : std_logic := '0';
+	-- Toggled whenever user writes new data to MOSI register in order to
+	-- signal the rest of logic to initiate data transmission
 	signal reg0_refreshed  : std_logic := '0';
-	signal reg3_refreshed  : std_logic := '0';
-	-- Toggled when last bit is received and transmission is completed
+	-- Toggled whenever last bit is received and transmission is completed
 	signal completed       : std_logic := '0';
-	signal last_reg3_refreshed : std_logic;
+	-- One-clock-delayed signals of 'reg0_refreshed' and 'completed' signals
 	signal last_reg0_refreshed : std_logic;
     signal last_completed : std_logic;
-    signal last_miso_data : std_logic;
+    --  System wide bit counter
+    --  Counts number of bits for MOSI/MISO data, incremented on every
+    --  rising clock edge until it reaches 'dataWidth'
     signal b_counter : integer := 0;
-    signal miso_data : std_logic_vector(7 downto 0) := (others => '0');
+    --  Data width for SPI communication (always 1 less than actual width)
+    --  Default: 8-bit data length
+    signal dataWidth : integer := 7;
 	--------------------------------------------------
 	---- Number of Slave Registers 4
 	
 	--Register 0: MOSI data, up to 4 bytes
 	signal slv_reg0	:std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0) := (others => '0');
-	--Register 1: MISO data, up to 4 bytes, lowest bytes first
+	--Register 1: MISO data, up to 4 bytes
 	signal slv_reg1	:std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0) := (others => '0');
 	--Register 2: SPI clock divider
 	signal slv_reg2	:std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0) := X"000001F4";
-	--Register 3: Slave select
-	signal slv_reg3	:std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0) := (others => '0');
+	-- Register 3: Config register
+	--     slave control: 2 downto 0  (R/W)
+	--     data width:    9 downto 4  (R/W)
+	--     status data:  31 (R)
+	signal slv_reg3	:std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0) := X"00000081";
 	signal slv_reg_rden	: std_logic;
 	signal slv_reg_wren	: std_logic;
 	signal reg_data_out	:std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
@@ -239,7 +245,7 @@ begin
 	      slv_reg0 <= (others => '0');
 	      --slv_reg1 <= (others => '0');
 	      slv_reg2 <= (others => '0');
-	      slv_reg3 <= (others => '0');
+	      slv_reg3(23 downto 0) <= (others => '0');
 	    else
 	      loc_addr := axi_awaddr(ADDR_LSB + OPT_MEM_ADDR_BITS downto ADDR_LSB);
 	      if (slv_reg_wren = '1') then
@@ -250,10 +256,9 @@ begin
 	                -- Respective byte enables are asserted as per write strobes                   
 	                -- slave registor 0
 	                slv_reg0(byte_index*8+7 downto byte_index*8) <= S_AXI_WDATA(byte_index*8+7 downto byte_index*8);
-	                --Set flag signaling that new data needs to be pushed to the slave
-	                
 	              end if;
 	            end loop;
+	            -- Set flag signaling that new data needs to be pushed to the slave
 	            reg0_refreshed <= NOT reg0_refreshed;          
 	          when b"01" =>
 	            for byte_index in 0 to (C_S_AXI_DATA_WIDTH/8-1) loop
@@ -261,7 +266,8 @@ begin
 	                -- Respective byte enables are asserted as per write strobes                   
 	                -- slave registor 1
 	                --slv_reg1(byte_index*8+7 downto byte_index*8) <= S_AXI_WDATA(byte_index*8+7 downto byte_index*8);
-	                --IN THIS IMPLEMENTATION REGISTER 1 IS READ-ONLY!
+	                -- IN THIS IMPLEMENTATION REGISTER 1 IS READ-ONLY containing
+	                -- data read from MISO line
 	              end if;
 	            end loop;
 	          when b"10" =>
@@ -273,19 +279,19 @@ begin
 	              end if;
 	            end loop;
 	          when b"11" =>
-	            for byte_index in 0 to (C_S_AXI_DATA_WIDTH/8-1) loop
+	          --Upper 8 bits (31 to 24) are read only status bits
+	            for byte_index in 0 to (C_S_AXI_DATA_WIDTH/8-2) loop
 	              if ( S_AXI_WSTRB(byte_index) = '1' ) then
 	                -- Respective byte enables are asserted as per write strobes                   
 	                -- slave registor 3
 	                slv_reg3(byte_index*8+7 downto byte_index*8) <= S_AXI_WDATA(byte_index*8+7 downto byte_index*8);
 	              end if;
 	            end loop;
-	            reg3_refreshed <= NOT reg3_refreshed;
 	          when others =>
 	            slv_reg0 <= slv_reg0;
 	            --slv_reg1 <= slv_reg1;
 	            slv_reg2 <= slv_reg2;
-	            slv_reg3 <= slv_reg3;
+	            slv_reg3(23 downto 0) <= slv_reg3(23 downto 0);
 	        end case;
 	      end if;
 	    end if;
@@ -418,19 +424,23 @@ begin
 	S_AXI_SPI_DBG2 <= completed;      --Debug probe
 	
 
-    --This part generates SPI clock based on 32-bit clock divider in slv_reg2
+    --  Generates SPI clock based on 32-bit clock divider in slv_reg2
+    --  This part uses main S_AXI_CLK running on 50MHz, applies user-specified 
+    --  clock divider from register2 to generate signal on CLK line.
+    --  Output is suppressed until 'mosi_data_flag' is low, once it goes high,
+    --  it acts enable signal and clock is sent out CLK line
     process (S_AXI_ACLK) is
         variable loc_counter : integer := 0;
     begin
-        --Count clock cyles 
+        --  Count clock cyles on the main clock signal in order to apply clock divider
         if (rising_edge(S_AXI_ACLK)) then
             loc_counter := loc_counter + 1;
         end if;
         
-        --Slave register 2 holds 32-bit clock divider, compare counter with it
+        --  Slave register 2 holds 32-bit clock divider, compare counter with it
         if (loc_counter >= to_integer(unsigned(slv_reg2(C_S_AXI_DATA_WIDTH-1 downto 0)))) then
             loc_counter := 0;
-            --clock_out <= ((NOT clock_out) AND mosi_data_flag) OR (NOT(mosi_data_flag));
+            
             if ((clock_out = '1') AND (mosi_data_flag = '1')) then
                 clock_out <= '0';
             else
@@ -439,53 +449,94 @@ begin
         end if;
     end process;
  
-    --  Switch between slaves   
-    last_reg3_refreshed <= reg3_refreshed when rising_edge(S_AXI_ACLK);
+    --  Switch between slaves
+    --  Last two bits of config. register are used to select which slave line
+    --  will be controlled from now on.
+    --  Third last bit controlls state of the line, if high, line goes high, 
+    --  if low, line goes low as well
     S_AXI_SPI_SS1 <= slv_reg3(2) when (slv_reg3(1 downto 0) = b"01") else '1';
     S_AXI_SPI_SS2 <= slv_reg3(2) when (slv_reg3(1 downto 0) = b"10") else '1';
     S_AXI_SPI_SS3 <= slv_reg3(2) when (slv_reg3(1 downto 0) = b"11") else '1';
     
+    --  Status signals
+    --  This signal is high as long as there is data transmission in progrsss,
+    --  goes low when specified number of bits has been sent/read
+    slv_reg3(31) <= mosi_data_flag;
+    
+    --  Map data width from slv_reg3
+    --  This saves part from config. register with user-set data-width into
+    --  a separate signal for PL to work with
+    dataWidth <= to_integer(unsigned(slv_reg3(9 downto 4)));
     
     --  Send data to MOSI pin on falling edge, MSB first
+    --  This process handles sending data from user input register out
+    --  throgh MOSI line
     process(clock_out) is 
     begin
         --  On falling edge set data on the pin
         if falling_edge(clock_out) then
-            S_AXI_SPI_MOSI <= slv_reg0(7-b_counter);
+            S_AXI_SPI_MOSI <= slv_reg0(dataWidth-b_counter-1);
         end if;
     end process;
 
     --  Read data from MISO pin on rising edge of clock, MSB first
+    --  This process handles reading data from MISO lines and saves it 
+    --  into a register for user to read
     process(clock_out) is
     begin
-        --  On falling edge set data on the pin
+        --  If we're about to start reading data (i.e. we're about to read
+        --  first bit) then clear whatever data has been left in register
+        --  from previous transaction
+        if (b_counter = 0) then
+            slv_reg1 <= (others => '0');
+        end if;
+        
+        --  Read data on the MISO line on rising clock edge and increment
+        --  bit counter for next cycle
         if rising_edge(clock_out) then
-            slv_reg1(7-b_counter) <= S_AXI_SPI_MISO;
+            slv_reg1(dataWidth-b_counter-1) <= S_AXI_SPI_MISO;
             b_counter <= b_counter +1;
         end if;
-            
-        if (b_counter = 8) then
+        
+        --  Reset bit counter once it has reached specified data width
+        --  This if-statement also sends system-wide signal for terminating
+        --  ongoing transaction
+        if (b_counter = dataWidth) then
+            --  Reset counter for next transaction
             b_counter <= 0;
+            --  Toggle 'completed' signal to send system-wide notice that the
+            --  transaction has been completed
             completed <= NOT completed;
         end if;
     end process;
    
-    --  Create one clock delayed signals for comparison
+    --  Create one clock delayed signals for edge detetion
     last_reg0_refreshed <= reg0_refreshed when rising_edge(S_AXI_ACLK);
     last_completed <= completed when rising_edge(S_AXI_ACLK);
     
+    --  Process awaits new data in reg0 (MOSI data), it then initiates clock 
+    --  generation and sending/receiving of data based on bus width
     process(last_completed, last_reg0_refreshed) is
     begin
-        --  Check if transmission has finished
+        --  Check if this process was entered because the transmission was
+        --  completed and signal 'completed' was toggled by receiving process
         if ((completed XOR last_completed) = '1') then
+            --  If so, clear the 'new-mosi-data flag' in order for system to
+            --  stop generating clock and halt any sending/receiving it was doing
             mosi_data_flag <= '0';
         end if;
         
+        --  Check if this process was entered because user wrote new data in
+        --  register that needs to be saved
+        --  NOTE: Writing new data in reg0 automatically initiates transmission
         if (((reg0_refreshed XOR last_reg0_refreshed) = '1') AND (mosi_data_flag = '0')) then
-            --  Raise a flag that we want to start transmitting, for clock module
-            if (slv_reg0(31 downto 16) = X"ABCD") then
-                mosi_data_flag <= '1';
-            end if;
+            --  Raise a global flag that we want to start transmitting
+            --  Raising this flag enables clock-generator to start outputting
+            --  clock signal on CLK line
+--            if (slv_reg0(31 downto 16) = X"ABCD") then
+--                mosi_data_flag <= '1';
+--            end if;
+            mosi_data_flag <= '1';
         end if; 
     end process;
 

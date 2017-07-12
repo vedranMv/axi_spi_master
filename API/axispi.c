@@ -4,23 +4,11 @@
  *  Created on: Apr 19, 2017
  *      Author: v125
  */
-#include <stdlib.h>
 #include "axispi.h"
 #include <sys/mman.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <unistd.h>
-
-//	Physical address of AXI peripheral
-#define BASE_ADDR	0x42000000
-//	R/W register containing data to be sent to slave
-#define REG_MOSIDATA	(BASE_ADDR+0)
-//	Read-only register containing data received from slave
-#define REG_MISODATA	(BASE_ADDR+4)
-//	R/W register containing clock divider
-#define REG_SPICLKDIV	(BASE_ADDR+8)
-//	R/W register used to set a slave to which master communicates
-#define REG_SLAVESEL	(BASE_ADDR+12)
-
 
 #define MAP_SIZE 32
 #define MAP_MASK (MAP_SIZE-1)
@@ -28,8 +16,19 @@ off_t target = BASE_ADDR;
 
 //	Parameters for R/W map
 int fd1;
-//	Array mapped to physical memory location of AXI peripheral
-volatile uint32_t *regMap;
+volatile uint32_t *map_base;
+
+
+//	R/W register containing data to be sent to slave
+#define REG_MOSIDATA	(device_handle.BaseAddress+0)
+//	Read-only register containing data received from slave
+#define REG_MISODATA	(device_handle.BaseAddress+4)
+//	R/W register containing clock divider
+#define REG_SPICLKDIV	(device_handle.BaseAddress+8)
+//	R/W register used configure SPI peripheral
+#define REG_CONFIG	(device_handle.BaseAddress+12)
+
+AXISPI device_handle;
 
 /******************************************************************************
  *******    Register manipulation    ******************************************
@@ -37,25 +36,24 @@ volatile uint32_t *regMap;
 
 /**
  *    Read AXI peripheral register
- *    @param regAddr address of register to access
- *    @return value stored in requested register
+ *    @param regAddr Address of register to access
+ *    @return value Stored in requested register
  */
-uint32_t Reg_Read(uint32_t regAddr)
+uint32_t Xil_In32(uint32_t regAddr)
 {
-    return regMap[(regAddr - BASE_ADDR)/sizeof(uint32_t)];
+    return map_base[(regAddr - BASE_ADDR)/4];
 }
 
 /**
  *    Write to AXI peripheral register
- *    @param regAddr address of register to access
- *    @param regVal new value to write to register
- *    @return value stored in requested register
+ *    @param regAddr Address of register to access
+ *    @param regVal New value to write to register
+ *    @return Value stored in requested register
  */
-uint32_t Reg_Write(uint32_t regAddr, uint32_t regVal)
+uint32_t Xil_Out32(uint32_t regAddr, uint32_t regVal)
 {
-    regMap[(regAddr - BASE_ADDR)/sizeof(uint32_t)] = regVal;
-
-    return regMap[(regAddr - BASE_ADDR)/sizeof(uint32_t)];
+    map_base[(regAddr - BASE_ADDR)/4] = regVal;
+    return map_base[(regAddr - BASE_ADDR)/4];
 }
 
 /******************************************************************************
@@ -67,20 +65,22 @@ uint32_t Reg_Write(uint32_t regAddr, uint32_t regVal)
  *    Map physical memory belonging to AXI module to virtual address space of 
  *    this program. Registers accessible through regMap[0/1/2/3] variable
  */
-int SPIInit()
+void SPIInit()
 {
+    device_handle.BaseAddress = BASE_ADDR;
+
     if((fd1=open("/dev/mem",O_RDWR))==0) 
     {
         perror("Error openning file /dev/mem");
-        return -1;
+        return;
     }
 
-    regMap = (volatile uint32_t*)mmap(0,MAP_SIZE,PROT_READ|PROT_WRITE,MAP_SHARED,fd1,target&~MAP_MASK);
+    map_base = (volatile uint32_t*)mmap(0,MAP_SIZE,PROT_READ|PROT_WRITE,MAP_SHARED,fd1,target&~MAP_MASK);
 
-    if(regMap == (void *)-1) 
+    if(map_base == (void *)-1) 
     {
         perror("Error mapping");
-        return -2;
+        return;
     }
 }
 
@@ -93,13 +93,27 @@ void SPIDeinit()
 }
 
 /**
- *    Set clock divider for for SPI clock
- *    @param divider clock divider by which AXI bus clock is divided when
- *    generating SPI clock (500 produces CLK of 100kHz)
+ *    Configure SPI peripheral
+ *    Function sets clock divider (base clock: 50MHz) and data width for
+ *    SPI communication (word size in bits)
  */
-void SPISetClockDivider(uint32_t divider)
+void SPIConfig(uint32_t div, uint8_t dataWidth)
 {
-    Reg_Write(REG_SPICLKDIV, divider);
+    //  Sanity check on data width
+    if (dataWidth < 5)
+        dataWidth = 5;
+    else if (dataWidth > 32)
+        dataWidth = 32;
+
+    device_handle.BaseAddress = BASE_ADDR;
+    Xil_Out32(REG_SPICLKDIV, div);
+
+    //  Write data width to config register
+    //  Read register and clear bus width-related bits
+    uint32_t reg = Xil_In32(REG_CONFIG) & (~(0x0000003F<<4));
+    //  OR new bus width into the register and write it to memory
+    Xil_Out32(REG_CONFIG, reg | ((dataWidth & 0x3F)<<4));
+
 }
 
 /**
@@ -108,7 +122,10 @@ void SPISetClockDivider(uint32_t divider)
  */
 void SPIActivateSlave(uint32_t id)
 {
-    Reg_Write(REG_SLAVESEL, id & 0x00000003);
+    //  Read register and clear slave-related bits
+    uint32_t reg = Xil_In32(REG_CONFIG) & (~0x0000000F);
+    //  OR new slave data into the register and write it in memory
+    Xil_Out32(REG_CONFIG, reg | (id & 0x00000003));
 }
 
 /**
@@ -117,7 +134,44 @@ void SPIActivateSlave(uint32_t id)
  */
 void SPIDeactivateSlave(uint32_t id)
 {
-    Reg_Write(REG_SLAVESEL, (id & 0x00000003) | 0x00000004);
+    //  Read register and clear slave-related bits
+    uint32_t reg = Xil_In32(REG_CONFIG) & (~0x0000000F);
+    //  OR new slave data into the register and write it in memory
+    Xil_Out32(REG_CONFIG, reg | (id & 0x00000003) | 0x00000004);
+}
+
+/**
+ *    Send data of size up to 32-bit over SPI
+ *    When configured to use data width different than 8bit this function
+ *    must be used to send data through SPI
+ *    @note Sending is initialized as soon as data is written into te register,
+ *    make sure SPIActivateSlave() has been called previously
+ *    @param data Data to be sent through SPI, size depends on data width
+ *    set through SPIConfig() function
+ *    @return Data received on MISO while sending
+ */
+uint32_t  SPIPutData(uint32_t data)
+{
+    Xil_Out32(REG_MOSIDATA, data);
+    while (SPIBusy());    //  Wait for end of transmission
+    
+    return SPIGetData();
+}
+
+/**
+ *    Read data received during last SPI transmission
+ *    When configured to use data width different than 8bit this function
+ *    must be used to read received data
+ *    @note This function just reads internal register, DOESN'T initiate new
+ *    sending task
+ *    @return Data received on MISO during last transaction
+ */
+uint32_t SPIGetData()
+{
+    uint32_t retVal;
+
+    retVal = Xil_In32(REG_MISODATA);
+    return retVal;
 }
 
 /**
@@ -129,38 +183,33 @@ void SPIDeactivateSlave(uint32_t id)
  */
 uint8_t  SPIPutByte(uint32_t data)
 {
-    uint16_t i;
+    uint32_t retVal = SPIPutData(data);
 
-    //  All data being sent has to be ORed with 0xABCD0000 to make start 
-    //  transmission
-    Reg_Write(REG_MOSIDATA, 0xABCD0000 | data);
-
-    //  Short delay, wait for end of transmission
-    for (i = 0; i < 8000; i++);	
-
-    return SPIGetByte();
+    return (uint8_t)(retVal & 0xFF);
 }
 
 /**
  *    Get last received byte on SPI bus
  *    Reads registers and returns last received byte stored in there
+ *    @note This function just reads internal register, DOESN'T initiate new
+ *    sending task
+ *    @return Last received byte
  */
-uint8_t SPIGetByte()
+uint8_t  SPIGetByte()
 {
-	uint8_t retVal;
+    uint32_t retVal = SPIGetData();
 
-	retVal = (uint8_t)(Reg_Read(REG_MISODATA) & 0xFF);
-	return retVal;
+    return (uint8_t)(retVal & 0xFF);
 }
 
 /**
- *    Reads and returns value of whole MISO data register, not only byte of data
+ *    Returns status of SPI communication
+ *    @return true if SPI transaction is in process, false if SPI is idle
  */
-uint32_t SPIGetMISO()
+bool SPIBusy()
 {
-	uint32_t retVal;
+    //  Last bit (31) is held high by PL during transmission
+    uint32_t reg = Xil_In32(REG_CONFIG);
 
-	retVal = Reg_Read(REG_MISODATA);
-	return retVal;
+    return reg & 0x80000000;
 }
-
