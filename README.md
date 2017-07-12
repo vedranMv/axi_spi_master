@@ -6,9 +6,9 @@ Implementation of SPI master in VHDL. IP core contains simple SPI master with va
 Features:
 
 ⋅⋅* Variable clock from 4.6kHz to 445kHz through 32bit clock divider (base clock 50MHz)
-⋅⋅* 3 slave-select outputs
-⋅⋅* Variable data length from 8 to 32 bits
-⋅⋅* Fixed polarity: Data is set on falling CLK edge and read on rising
+* 3 slave-select outputs
+* Variable data length from 8 to 32 bits
+* Fixed polarity: Data is set on falling CLK edge and read on rising
 
 Guidelines for using:
 1. Clone repo and add it to you IP core repository
